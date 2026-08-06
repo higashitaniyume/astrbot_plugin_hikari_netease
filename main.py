@@ -137,6 +137,7 @@ class NeteaseParserPlugin(Star):
 
     def __init__(self, context: Context, config: Any = None):
         super().__init__(context, config)
+        self.config = config
         self._queue: _Queue | None = None
 
     async def initialize(self) -> None:
