@@ -323,10 +323,7 @@ class NeteaseParserPlugin(Star):
         except Exception as e:
             await self._send(event, f"音频下载失败：{e}")
             return
-        try:
-            await event.send(MessageChain([Record(file=str(path))]))
-        finally:
-            _try_cleanup(path)
+        await self._send_audio(event, path)
 
     async def _process_program(self, event, program_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
         """播客节目：取 mainSong 音频 → 发语音消息。"""
@@ -343,8 +340,21 @@ class NeteaseParserPlugin(Star):
         except Exception as e:
             await self._send(event, f"音频下载失败：{e}")
             return
+        await self._send_audio(event, path)
+
+    async def _send_audio(self, event, path: Path) -> None:
+        """发送音频：优先语音消息，失败时降级为文件消息。"""
         try:
-            await event.send(MessageChain([Record(file=str(path))]))
+            try:
+                await event.send(MessageChain([Record(file=str(path))]))
+                return
+            except Exception as e:
+                logger.warning(f"[Netease] 语音消息发送失败，降级为文件消息: {e}")
+            try:
+                await event.send(MessageChain([File(name=path.name, file=str(path))]))
+            except Exception as e:
+                logger.warning(f"[Netease] 文件消息发送失败（可能平台不支持）: {e}")
+                await self._send(event, f"音频已下载但发送失败（当前平台可能不支持文件消息）：\n{path.name}")
         finally:
             _try_cleanup(path)
 
