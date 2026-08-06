@@ -23,7 +23,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import File, Plain, Record
 from astrbot.api.star import Context, Star, register
 
 try:
@@ -324,7 +324,7 @@ class NeteaseParserPlugin(Star):
             await self._send(event, f"音频下载失败：{e}")
             return
         try:
-            await event.send(event.record_result(str(path)))
+            await event.send(MessageChain([Record(file=str(path))]))
         finally:
             _try_cleanup(path)
 
@@ -344,7 +344,7 @@ class NeteaseParserPlugin(Star):
             await self._send(event, f"音频下载失败：{e}")
             return
         try:
-            await event.send(event.record_result(str(path)))
+            await event.send(MessageChain([Record(file=str(path))]))
         finally:
             _try_cleanup(path)
 
@@ -405,7 +405,7 @@ class NeteaseParserPlugin(Star):
         await self._send(event, f"打包完成，共 {len(zip_paths)} 个 ZIP{note}")
         for zip_path in zip_paths:
             try:
-                await event.send(event.file_result(str(zip_path)))
+                await event.send(MessageChain([File(name=zip_path.name, file=str(zip_path))]))
             except Exception as e:
                 logger.warning(f"[Netease] ZIP 发送失败（可能平台不支持文件消息）: {e}")
                 await self._send(event, f"ZIP 已生成但发送失败（当前平台可能不支持文件消息）：\n{zip_path}")
