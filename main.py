@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import re
 import tempfile
@@ -323,7 +324,8 @@ class NeteaseParserPlugin(Star):
         except Exception as e:
             await self._send(event, f"音频下载失败：{e}")
             return
-        await self._send_audio(event, path)
+        display_name = f"{_sanitize_filename(info.name)} - {_sanitize_filename(info.artist)}{ext}"
+        await self._send_audio(event, path, display_name)
 
     async def _process_program(self, event, program_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
         """播客节目：取 mainSong 音频 → 发语音消息。"""
@@ -340,17 +342,40 @@ class NeteaseParserPlugin(Star):
         except Exception as e:
             await self._send(event, f"音频下载失败：{e}")
             return
-        await self._send_audio(event, path)
+        display_name = f"{_sanitize_filename(info.name)} - {_sanitize_filename(info.artist)}{ext}"
+        await self._send_audio(event, path, display_name)
 
-    async def _send_audio(self, event, path: Path) -> None:
-        """发送音频：固定使用文件消息（语音消息大文件易超时）。"""
+    async def _send_audio(self, event, path: Path, display_name: str) -> None:
+        """发送音频：优先经 OneBot 上传接口以 base64 发送（跨容器可用），失败时降级为文件消息。"""
         try:
-            await event.send(MessageChain([File(name=path.name, file=str(path))]))
-        except Exception as e:
-            logger.warning(f"[Netease] 文件消息发送失败（可能平台不支持）: {e}")
-            await self._send(event, f"音频已下载但发送失败（当前平台可能不支持文件消息）：\n{path.name}")
+            try:
+                await self._upload_onebot_file(event, path, display_name)
+                return
+            except Exception as e:
+                logger.warning(f"[Netease] OneBot 文件上传失败，降级为文件消息: {e}")
+            try:
+                await event.send(MessageChain([File(name=display_name, file=str(path))]))
+            except Exception as e:
+                logger.warning(f"[Netease] 文件消息发送失败（可能平台不支持）: {e}")
+                await self._send(event, f"音频已下载但发送失败（当前平台可能不支持文件消息）：\n{display_name}")
         finally:
             _try_cleanup(path)
+
+    async def _upload_onebot_file(self, event: AstrMessageEvent, path: Path, name: str) -> None:
+        """通过 OneBot upload_*_file 接口上传文件（base64，兼容协议端与 AstrBot 分离部署）。"""
+        bot = getattr(event, "bot", None)
+        if bot is None or not hasattr(bot, "call_action"):
+            raise RuntimeError("当前平台不支持 OneBot 文件上传")
+        raw = await asyncio.to_thread(path.read_bytes)
+        payload = f"base64://{base64.b64encode(raw).decode()}"
+        group_id = event.get_group_id()
+        if group_id and str(group_id).isdigit():
+            await bot.call_action("upload_group_file", group_id=int(group_id), file=payload, name=name)
+        else:
+            user_id = event.get_sender_id()
+            if not user_id or not str(user_id).isdigit():
+                raise RuntimeError("无法获取有效的用户 ID")
+            await bot.call_action("upload_private_file", user_id=int(user_id), file=payload, name=name)
 
     async def _process_album(self, event, album_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
         """专辑：批量下载 → ZIP 打包发送。"""
@@ -409,10 +434,16 @@ class NeteaseParserPlugin(Star):
         await self._send(event, f"打包完成，共 {len(zip_paths)} 个 ZIP{note}")
         for zip_path in zip_paths:
             try:
-                await event.send(MessageChain([File(name=zip_path.name, file=str(zip_path))]))
-            except Exception as e:
-                logger.warning(f"[Netease] ZIP 发送失败（可能平台不支持文件消息）: {e}")
-                await self._send(event, f"ZIP 已生成但发送失败（当前平台可能不支持文件消息）：\n{zip_path}")
+                try:
+                    await self._upload_onebot_file(event, zip_path, zip_path.name)
+                    continue
+                except Exception as e:
+                    logger.warning(f"[Netease] OneBot ZIP 上传失败，降级为文件消息: {e}")
+                try:
+                    await event.send(MessageChain([File(name=zip_path.name, file=str(zip_path))]))
+                except Exception as e:
+                    logger.warning(f"[Netease] ZIP 发送失败（可能平台不支持文件消息）: {e}")
+                    await self._send(event, f"ZIP 已生成但发送失败（当前平台可能不支持文件消息）：\n{zip_path}")
             finally:
                 _try_cleanup(zip_path)
 
