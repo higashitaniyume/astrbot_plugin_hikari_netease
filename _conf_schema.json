@@ -20,7 +20,7 @@
   "auto_parse_groups": {
     "description": "自动解析的群聊（不在此列表的群需要 @ 机器人才解析）",
     "type": "object",
-    "properties": {
+    "items": {
       "enable": { "type": "bool", "default": false, "description": "启用指定群自动解析" },
       "groups": {
         "type": "list",
@@ -33,7 +33,7 @@
   "parse_queue": {
     "description": "解析队列设置",
     "type": "object",
-    "properties": {
+    "items": {
       "enabled": { "type": "bool", "default": true, "description": "启用后台队列（关闭则同步处理）" },
       "delay_seconds": { "type": "float", "default": 0.8, "description": "任务间延迟（秒）" }
     }
