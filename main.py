@@ -23,7 +23,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import File, Plain, Record
+from astrbot.api.message_components import File, Plain
 from astrbot.api.star import Context, Star, register
 
 try:
@@ -343,18 +343,12 @@ class NeteaseParserPlugin(Star):
         await self._send_audio(event, path)
 
     async def _send_audio(self, event, path: Path) -> None:
-        """发送音频：优先语音消息，失败时降级为文件消息。"""
+        """发送音频：固定使用文件消息（语音消息大文件易超时）。"""
         try:
-            try:
-                await event.send(MessageChain([Record(file=str(path))]))
-                return
-            except Exception as e:
-                logger.warning(f"[Netease] 语音消息发送失败，降级为文件消息: {e}")
-            try:
-                await event.send(MessageChain([File(name=path.name, file=str(path))]))
-            except Exception as e:
-                logger.warning(f"[Netease] 文件消息发送失败（可能平台不支持）: {e}")
-                await self._send(event, f"音频已下载但发送失败（当前平台可能不支持文件消息）：\n{path.name}")
+            await event.send(MessageChain([File(name=path.name, file=str(path))]))
+        except Exception as e:
+            logger.warning(f"[Netease] 文件消息发送失败（可能平台不支持）: {e}")
+            await self._send(event, f"音频已下载但发送失败（当前平台可能不支持文件消息）：\n{path.name}")
         finally:
             _try_cleanup(path)
 
