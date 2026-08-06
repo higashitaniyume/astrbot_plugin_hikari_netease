@@ -1,0 +1,36 @@
+{
+  "enabled": { "type": "bool", "default": true, "description": "启用插件" },
+  "api_base_url": {
+    "type": "string",
+    "default": "http://localhost:3000",
+    "description": "api-enhanced 网易云 API 服务器地址（如 http://192.168.1.10:3000）"
+  },
+  "api_timeout": { "type": "int", "default": 30, "description": "API 请求超时（秒）" },
+  "real_ip": { "type": "string", "default": "", "description": "网易云接口 realIP 参数（可解锁部分地区限制，可选）" },
+  "cookie": { "type": "string", "default": "", "description": "已登录网易云账号的 cookie（用于解析 VIP 歌曲，可选）" },
+  "default_quality": { "type": "string", "default": "flac", "description": "默认音质：flac（高音质）或 mp3（320k）" },
+  "max_file_mb": { "type": "int", "default": 200, "description": "单文件大小上限（MB）" },
+  "max_links_per_message": { "type": "int", "default": 5, "description": "单条消息最多解析的链接数" },
+  "short_link_timeout": { "type": "int", "default": 10, "description": "163cn.tv 短链接解析超时（秒）" },
+  "quality_switch": { "type": "bool", "default": true, "description": "允许通过发送 mp3/flac 字样切换格式偏好" },
+  "cache_dir": { "type": "string", "default": "", "description": "音频缓存目录（留空用系统临时目录）" },
+  "pack_dir": { "type": "string", "default": "", "description": "ZIP 打包目录（留空用系统临时目录）" },
+  "max_songs_per_zip": { "type": "int", "default": 50, "description": "单个 ZIP 最多包含的歌曲数" },
+  "max_zip_mb": { "type": "int", "default": 200, "description": "单个 ZIP 大小上限（MB）" },
+  "auto_parse_groups": {
+    "description": "自动解析的群聊（不在此列表的群需要 @ 机器人才解析）",
+    "type": "object",
+    "properties": {
+      "enable": { "type": "bool", "default": false, "description": "启用指定群自动解析" },
+      "groups": { "type": "list", "default": [], "description": "群号列表" }
+    }
+  },
+  "parse_queue": {
+    "description": "解析队列设置",
+    "type": "object",
+    "properties": {
+      "enabled": { "type": "bool", "default": true, "description": "启用后台队列（关闭则同步处理）" },
+      "delay_seconds": { "type": "float", "default": 0.8, "description": "任务间延迟（秒）" }
+    }
+  }
+}
