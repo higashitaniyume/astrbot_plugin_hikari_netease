@@ -23,6 +23,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message import MessageChain, Plain
 from astrbot.api.star import Context, Star, register
 
 try:
@@ -158,6 +159,10 @@ class NeteaseParserPlugin(Star):
     def _cfg(self) -> dict[str, Any]:
         return self.config or {}
 
+    async def _send(self, event: AstrMessageEvent, text: str) -> None:
+        """发送纯文本消息（AstrBot 的 event.send 要求 MessageChain）。"""
+        await event.send(MessageChain([Plain(text)]))
+
     def _is_auto_parse_group(self, group_id: str) -> bool:
         auto = self._cfg().get("auto_parse_groups")
         if not isinstance(auto, dict):
@@ -271,7 +276,7 @@ class NeteaseParserPlugin(Star):
         cfg = self._cfg()
         api_base = str(cfg.get("api_base_url") or "").strip()
         if not api_base:
-            await event.send("未配置网易云 API 地址（api_base_url）")
+            await self._send(event, "未配置网易云 API 地址（api_base_url）")
             return
         real_ip = str(cfg.get("real_ip") or "")
         cookie = str(cfg.get("cookie") or "")
@@ -298,25 +303,25 @@ class NeteaseParserPlugin(Star):
                 await self._process_playlist(event, job.item_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb)
         except ValueError as e:
             logger.warning(f"[Netease] {job.item_type} {job.item_id} 失败: {e}")
-            await event.send(str(e))
+            await self._send(event, str(e))
         except Exception as e:
             logger.exception(f"[Netease] {job.item_type} {job.item_id} 处理异常: {e}")
-            await event.send(f"解析失败：{type(e).__name__}")
+            await self._send(event, f"解析失败：{type(e).__name__}")
 
     async def _process_song(self, event, song_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
         """单曲：下载音频 → 发语音消息。"""
         info = await fetch_song_detail(song_id, api_base, timeout, real_ip)
-        await event.send(f"正在解析：{info.name} - {info.artist}")
+        await self._send(event, f"正在解析：{info.name} - {info.artist}")
 
         url_result = await fetch_song_url(song_id, api_base, timeout, real_ip, high_quality, cookie)
         if not url_result.url:
-            await event.send("音频不可用（可能需要版权/登录），可尝试在消息中附带 mp3 或 flac 切换格式")
+            await self._send(event, "音频不可用（可能需要版权/登录），可尝试在消息中附带 mp3 或 flac 切换格式")
             return
         ext = ".flac" if high_quality and url_result.type == "flac" else ".mp3"
         try:
             path = await download_audio(url_result.url, cache_dir, timeout, max_file_mb, file_ext=ext)
         except Exception as e:
-            await event.send(f"音频下载失败：{e}")
+            await self._send(event, f"音频下载失败：{e}")
             return
         try:
             await event.send(event.record_result(str(path)))
@@ -326,17 +331,17 @@ class NeteaseParserPlugin(Star):
     async def _process_program(self, event, program_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
         """播客节目：取 mainSong 音频 → 发语音消息。"""
         info = await fetch_program_detail(program_id, api_base, timeout, real_ip, cookie)
-        await event.send(f"正在解析播客：{info.name} - {info.artist}")
+        await self._send(event, f"正在解析播客：{info.name} - {info.artist}")
 
         url_result = await fetch_song_url(info.id, api_base, timeout, real_ip, high_quality, cookie)
         if not url_result.url:
-            await event.send("音频不可用（可能需要版权/登录）")
+            await self._send(event, "音频不可用（可能需要版权/登录）")
             return
         ext = ".flac" if high_quality and url_result.type == "flac" else ".mp3"
         try:
             path = await download_audio(url_result.url, cache_dir, timeout, max_file_mb, file_ext=ext)
         except Exception as e:
-            await event.send(f"音频下载失败：{e}")
+            await self._send(event, f"音频下载失败：{e}")
             return
         try:
             await event.send(event.record_result(str(path)))
@@ -346,13 +351,13 @@ class NeteaseParserPlugin(Star):
     async def _process_album(self, event, album_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
         """专辑：批量下载 → ZIP 打包发送。"""
         album_name, songs = await fetch_album_detail(album_id, api_base, timeout, real_ip)
-        await event.send(f"专辑「{album_name}」共 {len(songs)} 首，开始下载打包……")
+        await self._send(event, f"专辑「{album_name}」共 {len(songs)} 首，开始下载打包……")
         await self._download_and_pack(event, songs, album_name, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb)
 
     async def _process_playlist(self, event, playlist_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
         """歌单：批量下载 → ZIP 打包发送。"""
         playlist_name, songs = await fetch_playlist_detail(playlist_id, api_base, timeout, real_ip)
-        await event.send(f"歌单「{playlist_name}」共 {len(songs)} 首，开始下载打包……")
+        await self._send(event, f"歌单「{playlist_name}」共 {len(songs)} 首，开始下载打包……")
         await self._download_and_pack(event, songs, playlist_name, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb)
 
     async def _download_and_pack(self, event, songs: list[NeteaseSongInfo], zip_name: str,
@@ -382,7 +387,7 @@ class NeteaseParserPlugin(Star):
                 break
 
         if not files:
-            await event.send("没有成功下载任何歌曲")
+            await self._send(event, "没有成功下载任何歌曲")
             return
 
         output_dir = Path(str(cfg.get("pack_dir") or _TEMP_ROOT / "pack"))
@@ -393,17 +398,17 @@ class NeteaseParserPlugin(Star):
             )
         except Exception as e:
             logger.exception(f"[Netease] ZIP 打包失败: {e}")
-            await event.send(f"打包失败：{e}")
+            await self._send(event, f"打包失败：{e}")
             return
 
         note = f"（{failed} 首下载失败）" if failed else ""
-        await event.send(f"打包完成，共 {len(zip_paths)} 个 ZIP{note}")
+        await self._send(event, f"打包完成，共 {len(zip_paths)} 个 ZIP{note}")
         for zip_path in zip_paths:
             try:
                 await event.send(event.file_result(str(zip_path)))
             except Exception as e:
                 logger.warning(f"[Netease] ZIP 发送失败（可能平台不支持文件消息）: {e}")
-                await event.send(f"ZIP 已生成但发送失败（当前平台可能不支持文件消息）：\n{zip_path}")
+                await self._send(event, f"ZIP 已生成但发送失败（当前平台可能不支持文件消息）：\n{zip_path}")
             finally:
                 _try_cleanup(zip_path)
 
