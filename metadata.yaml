@@ -3,3 +3,7 @@ desc: 网易云音乐解析：自动识别歌曲/专辑/歌单/播客链接，�
 author: higashitaniyume
 version: 1.0.0
 repo: https://github.com/higashitaniyume/astrbot_plugin_hikari_netease
+tags:
+  - 音乐
+  - 下载
+  - 链接解析
