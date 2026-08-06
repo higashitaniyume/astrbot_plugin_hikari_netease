@@ -238,20 +238,16 @@ class NeteaseParserPlugin(Star):
         # 优先级：歌单 > 专辑 > 单曲/播客
         if ids["playlist"]:
             for pid in ids["playlist"]:
-                async for result in self._enqueue(event, pid, "playlist", quality):
-                    yield result
+                await self._enqueue(event, pid, "playlist", quality)
             return
         if ids["album"]:
             for album_id in ids["album"]:
-                async for result in self._enqueue(event, album_id, "album", quality):
-                    yield result
+                await self._enqueue(event, album_id, "album", quality)
             return
         for pid in ids["program"]:
-            async for result in self._enqueue(event, pid, "program", quality):
-                yield result
+            await self._enqueue(event, pid, "program", quality)
         for sid in ids["song"]:
-            async for result in self._enqueue(event, sid, "song", quality):
-                yield result
+            await self._enqueue(event, sid, "song", quality)
 
     async def _enqueue(self, event: AstrMessageEvent, item_id: str, item_type: str, quality: str):
         job = _ParseJob(
