@@ -22,7 +22,12 @@
     "type": "object",
     "properties": {
       "enable": { "type": "bool", "default": false, "description": "启用指定群自动解析" },
-      "groups": { "type": "list", "default": [], "description": "群号列表" }
+      "groups": {
+        "type": "list",
+        "default": [],
+        "items": { "type": "string", "description": "群号" },
+        "description": "群号列表"
+      }
     }
   },
   "parse_queue": {
