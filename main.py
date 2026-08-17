@@ -2,11 +2,12 @@
 网易云音乐解析插件。
 
 功能：
-- 自动识别 music.163.com 歌曲/专辑/歌单/播客链接与 163cn.tv 短链接
-- 私聊自动解析；群聊默认仅在被 @ 时解析（可在配置中开启 auto_parse_groups 指定群自动解析）
-- 单曲/播客：下载音频后发送语音消息
-- 专辑/歌单：批量下载后打包 ZIP 发送（仅私聊）
-- 消息含 mp3 / flac 字样可切换音频格式偏好
+- 自动识别 music.163.com 歌曲/专辑/歌单/播客链接与 163cn.tv 短链接（含 QQ 卡片与引用回复）
+- 私聊发链接/卡片即解析；群聊默认仅「@bot + 链接」或「@bot + 引用卡片」时解析
+  （可在配置中开启 auto_parse_groups 指定群自动解析）
+- 单曲/播客：下载音频后发送；专辑/歌单：批量下载后打包 ZIP（仅私聊）
+- 默认发最高音质；改音质唯一入口为「回复机器人消息 + mp3/flac」（更新偏好并重发）
+- 群聊收到网易云链接但未 @ 时，回一句引导提示（带冷却）
 
 移植自 HIKARI BOT NEO 的 netease_parser 插件。代码独立，不依赖任何宿主机器人模块。
 """
@@ -18,13 +19,15 @@ import base64
 import os
 import re
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
-from astrbot.api.message_components import File, Plain
+from astrbot.api.event.filter import CustomFilter
+from astrbot.api.message_components import File, Json, Music, Plain, Reply, Share
 from astrbot.api.star import Context, Star, register
 
 try:
@@ -64,12 +67,9 @@ except ImportError:
         has_netease_url,
     )
 
-# 消息中带 mp3 / flac 字样 → 指定格式（覆盖偏好）
+# 消息中带 mp3 / flac 字样（仅用于「回复换格式」场景）
 _MP3_RE = re.compile(r"(?<![a-z])mp3(?![a-z])", re.I)
 _FLAC_RE = re.compile(r"(?<![a-z])flac(?![a-z])", re.I)
-
-# 触发正则：网易云链接 或 格式字样
-_TRIGGER_RE = r"music\.163\.com|163cn\.tv|(?<![a-z])mp3(?![a-z])|(?<![a-z])flac(?![a-z])"
 
 # 临时目录
 if os.name == "nt":
@@ -77,10 +77,109 @@ if os.name == "nt":
 else:
     _TEMP_ROOT = Path("/tmp/astrbot_netease")
 
+# 回复换格式时，重发记录的时间窗（秒）
+_RECENT_WINDOW_SECONDS = 30 * 60
+
 
 def _sanitize_filename(text: str) -> str:
     """清理文件名中的非法字符。"""
     return "".join(c for c in text if c.isprintable() and c not in r'<>:"/\|?*').strip() or "netease"
+
+
+# ── 组件 URL 提取工具 ──
+
+
+def _json_urls(data: Any) -> list[str]:
+    """递归从 JSON 卡片数据中提取所有含 http 的字符串。"""
+    urls: list[str] = []
+    if isinstance(data, dict):
+        for value in data.values():
+            urls.extend(_json_urls(value))
+    elif isinstance(data, list):
+        for item in data:
+            urls.extend(_json_urls(item))
+    elif isinstance(data, str) and "http" in data:
+        urls.append(data)
+    return urls
+
+
+def _component_urls(seg: Any) -> list[str]:
+    """从单个消息组件提取可能的 URL（QQ 音乐卡片 / 分享卡片 / JSON 卡片）。"""
+    urls: list[str] = []
+    if isinstance(seg, Music):
+        for field_name in ("url", "audio"):
+            value = getattr(seg, field_name, None)
+            if isinstance(value, str) and "http" in value:
+                urls.append(value)
+    elif isinstance(seg, Share):
+        value = getattr(seg, "url", None)
+        if isinstance(value, str) and "http" in value:
+            urls.append(value)
+    elif isinstance(seg, Json):
+        urls.extend(_json_urls(getattr(seg, "data", None)))
+    return urls
+
+
+def _component_has_netease(seg: Any) -> bool:
+    """组件中是否含网易云链接。"""
+    return any(has_netease_url(u) for u in _component_urls(seg))
+
+
+def _collect_card_urls(segments: list) -> list[str]:
+    """从消息组件列表中提取所有卡片 URL。"""
+    urls: list[str] = []
+    for seg in segments:
+        urls.extend(_component_urls(seg))
+    return urls
+
+
+def _find_reply(segments: list) -> Reply | None:
+    """从消息组件列表中查找第一个引用回复组件。"""
+    for seg in segments:
+        if isinstance(seg, Reply):
+            return seg
+    return None
+
+
+def _reply_urls(reply_seg: Reply) -> list[str]:
+    """提取被引用消息中的 URL（正文 + 卡片）。"""
+    urls: list[str] = []
+    if isinstance(getattr(reply_seg, "message_str", None), str) and reply_seg.message_str:
+        urls.append(reply_seg.message_str)
+    for comp in (getattr(reply_seg, "chain", None) or []):
+        urls.extend(_component_urls(comp))
+    return urls
+
+
+# ── 触发 Filter ──
+
+
+class NeteaseTriggerFilter(CustomFilter):
+    """自定义触发器：覆盖网易云链接（正文/卡片/引用）与 mp3/flac 字样。
+
+    相比 @filter.regex，这里能访问完整消息链，从而识别 QQ 音乐卡片
+    与「@bot + 引用卡片」这类 message_str 里没有链接的场景。
+    """
+
+    def filter(self, event: AstrMessageEvent, cfg: Any) -> bool:
+        try:
+            text = event.message_str or ""
+            if _MP3_RE.search(text) or _FLAC_RE.search(text):
+                return True
+            if has_netease_url(text):
+                return True
+            for seg in event.get_messages():
+                if isinstance(seg, Reply):
+                    if seg.message_str and has_netease_url(seg.message_str):
+                        return True
+                    for comp in (seg.chain or []):
+                        if _component_has_netease(comp):
+                            return True
+                elif _component_has_netease(seg):
+                    return True
+        except Exception:
+            pass
+        return False
 
 
 @dataclass
@@ -92,6 +191,17 @@ class _ParseJob:
     item_type: str  # song / program / album / playlist
     quality: str  # auto / mp3 / flac
     user_id: str
+
+
+@dataclass
+class _SentRecord:
+    """一次发送记录，用于「回复 mp3/flac 换格式重发」。"""
+
+    item_type: str  # song / program / album / playlist
+    item_id: str
+    title: str
+    quality: str  # flac / mp3（实际格式）
+    sent_at: float = field(default_factory=time.time)
 
 
 class _Queue:
@@ -133,7 +243,7 @@ class _Queue:
                 await asyncio.sleep(self._delay)
 
 
-@register("netease", "higashitaniyume", "网易云音乐解析：自动识别歌曲/专辑/歌单/播客链接，私聊发音频或 ZIP", "1.0.0")
+@register("netease", "higashitaniyume", "网易云音乐解析：自动识别歌曲/专辑/歌单/播客链接，私聊发音频或 ZIP", "1.1.0")
 class NeteaseParserPlugin(Star):
     """网易云音乐解析插件。"""
 
@@ -141,6 +251,8 @@ class NeteaseParserPlugin(Star):
         super().__init__(context, config)
         self.config = config
         self._queue: _Queue | None = None
+        self._recent: dict[str, list[_SentRecord]] = {}
+        self._card_hint_last: dict[str, float] = {}
 
     async def initialize(self) -> None:
         """启动解析队列 worker。"""
@@ -187,35 +299,117 @@ class NeteaseParserPlugin(Star):
         data[user_id] = quality
         await self.put_kv_data("user_quality", data)
 
+    # ── 发送记录（回复换格式重发用） ──
+
+    def _record_send(self, user_id: str, item_type: str, item_id: str, title: str, quality: str) -> None:
+        if not user_id:
+            return
+        rec = _SentRecord(item_type=item_type, item_id=item_id, title=title, quality=quality)
+        lst = self._recent.setdefault(user_id, [])
+        lst.insert(0, rec)
+        del lst[5:]
+        logger.info(f"[Netease] 记录发送 → user={user_id} type={item_type} id={item_id} quality={quality}")
+
+    def _find_recent(self, user_id: str) -> _SentRecord | None:
+        """查找该用户最近一条时间窗内的发送记录。"""
+        if not user_id:
+            return None
+        now = time.time()
+        for rec in self._recent.get(user_id, []):
+            if now - rec.sent_at <= _RECENT_WINDOW_SECONDS:
+                return rec
+        return None
+
     # ── 入口 ──
 
-    @filter.regex(_TRIGGER_RE)
+    @filter.custom_filter(NeteaseTriggerFilter)
     async def on_netease_message(self, event: AstrMessageEvent):
-        """匹配网易云链接或 mp3/flac 字样"""
+        """网易云链接 / 卡片 / 引用 / mp3-flac 触发的主入口。"""
         cfg = self._cfg()
         if not cfg.get("enabled", True):
             return
 
         text = event.message_str or ""
-        card_texts = _extract_card_texts(event)
-        full_text = text + ("\n" + "\n".join(card_texts) if card_texts else "")
+        segments = list(event.get_messages())
+        reply_seg = _find_reply(segments)
+        card_urls = _collect_card_urls(segments)
 
-        # 无网易云链接 → 纯 mp3/flac 字样 → 设置格式偏好
-        if not has_netease_url(full_text):
-            async for result in self._handle_quality_switch(event, text):
-                yield result
+        own_has_link = has_netease_url(text) or any(has_netease_url(u) for u in card_urls)
+
+        reply_urls = _reply_urls(reply_seg) if reply_seg is not None else []
+        reply_has_link = any(has_netease_url(u) for u in reply_urls)
+
+        has_mp3_flac = bool(_MP3_RE.search(text) or _FLAC_RE.search(text))
+
+        # 1) 回复换格式：回复机器人消息 + mp3/flac（无链接）
+        if has_mp3_flac and reply_seg is not None and not own_has_link and not reply_has_link:
+            if str(reply_seg.sender_id) == str(event.get_self_id()):
+                async for result in self._handle_quality_reply(event, text):
+                    yield result
+                event.stop_event()
             return
 
-        # 群聊策略：默认手动解析（仅被 @ 时），auto_parse_groups 指定群自动解析
-        if event.get_message_type() == "group_message":
-            group_id = event.get_group_id()
-            at_wake = bool(getattr(event, "is_at_or_wake_command", False))
-            if not (self._is_auto_parse_group(group_id) or at_wake):
-                logger.info(f"[Netease] 群聊手动解析：group={group_id} at_or_wake={at_wake} → 跳过")
+        # 2) 解析：自身链接或引用链接
+        if own_has_link or reply_has_link:
+            is_group = bool(event.get_group_id())
+            is_tome = bool(event.is_at_or_wake_command)
+
+            # 群聊非白名单、未 @ → 卡片引导（带冷却）
+            if is_group and not is_tome and not self._is_auto_parse_group(event.get_group_id()):
+                if self._card_hint_ready(event.get_group_id()):
+                    self._mark_card_hint(event.get_group_id())
+                    yield event.plain_result("🎵 想下载这首歌？引用这条卡片并 @我 即可")
                 return
 
-        async for result in self._handle_links(event, full_text):
-            yield result
+            full_text = text
+            extra_urls = card_urls + reply_urls
+            if extra_urls:
+                joined = "\n".join(extra_urls)
+                full_text = f"{full_text}\n{joined}" if full_text else joined
+
+            async for result in self._handle_links(event, full_text):
+                yield result
+            event.stop_event()
+            return
+
+    # ── 卡片引导冷却 ──
+
+    def _card_hint_ready(self, group_id: str) -> bool:
+        hint = self._cfg().get("card_hint")
+        if not isinstance(hint, dict) or not hint.get("enabled", True):
+            return False
+        cooldown = max(0.0, float(hint.get("cooldown_seconds", 300)))
+        last = self._card_hint_last.get(str(group_id), 0.0)
+        return (time.monotonic() - last) >= cooldown
+
+    def _mark_card_hint(self, group_id: str) -> None:
+        self._card_hint_last[str(group_id)] = time.monotonic()
+
+    # ── 回复换格式 ──
+
+    async def _handle_quality_reply(self, event: AstrMessageEvent, text: str):
+        cfg = self._cfg()
+        if not cfg.get("quality_switch", True):
+            return
+        if _FLAC_RE.search(text) and not _MP3_RE.search(text):
+            target = "flac"
+        else:
+            target = "mp3"
+        user_id = event.get_sender_id() or ""
+        label = target.upper()
+        rec = self._find_recent(user_id)
+        logger.info(f"[Netease] 回复换格式 → user={user_id} target={label} hit={rec is not None}")
+
+        if rec is None:
+            await self._set_user_quality(user_id, target)
+            yield event.plain_result(f"已记住你的偏好：以后解析默认发 {label}（直接发链接即可）")
+            return
+        if rec.quality == target:
+            yield event.plain_result(f"这条已经是 {label} 版了～")
+            return
+        await self._set_user_quality(user_id, target)
+        yield event.plain_result(f"已改默认音质为 {label}，正在重新发送～")
+        await self._enqueue(event, rec.item_id, rec.item_type, target)
 
     # ── 链接解析流程 ──
 
@@ -228,16 +422,11 @@ class NeteaseParserPlugin(Star):
             max_links=max_links,
         )
 
-        # 消息内带 mp3/flac 字样 → 本次解析按指定格式（覆盖偏好）
-        if _MP3_RE.search(full_text) and not _FLAC_RE.search(full_text):
-            quality = "mp3"
-        elif _FLAC_RE.search(full_text) and not _MP3_RE.search(full_text):
-            quality = "flac"
-        else:
-            quality = "auto"
+        # 音质由用户偏好决定（改音质只走回复换格式）
+        quality = "auto"
 
         # 群聊中专辑/歌单仅提示私聊
-        if (ids["album"] or ids["playlist"]) and event.get_message_type() == "group_message":
+        if (ids["album"] or ids["playlist"]) and bool(event.get_group_id()):
             yield event.plain_result("专辑/歌单请私聊发送，我会打包发给你～")
             return
 
@@ -310,15 +499,15 @@ class NeteaseParserPlugin(Star):
             await self._send(event, f"解析失败：{type(e).__name__}")
 
     async def _process_song(self, event, song_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
-        """单曲：下载音频 → 发语音消息。"""
+        """单曲：下载音频 → 发送。"""
         info = await fetch_song_detail(song_id, api_base, timeout, real_ip)
         await self._send(event, f"正在解析：{info.name} - {info.artist}")
 
         url_result = await fetch_song_url(song_id, api_base, timeout, real_ip, high_quality, cookie)
         if not url_result.url:
-            await self._send(event, "音频不可用（可能需要版权/登录），可尝试在消息中附带 mp3 或 flac 切换格式")
+            await self._send(event, "音频不可用（可能需要版权/登录）")
             return
-        ext = ".flac" if high_quality and url_result.type == "flac" else ".mp3"
+        ext = ".flac" if url_result.type == "flac" else ".mp3"
         try:
             path = await download_audio(url_result.url, cache_dir, timeout, max_file_mb, file_ext=ext)
         except Exception as e:
@@ -326,9 +515,13 @@ class NeteaseParserPlugin(Star):
             return
         display_name = f"{_sanitize_filename(info.name)} - {_sanitize_filename(info.artist)}{ext}"
         await self._send_audio(event, path, display_name)
+        self._record_send(
+            event.get_sender_id() or "", "song", song_id, info.name,
+            "flac" if url_result.type == "flac" else "mp3",
+        )
 
     async def _process_program(self, event, program_id, api_base, real_ip, cookie, timeout, high_quality, cache_dir, max_file_mb) -> None:
-        """播客节目：取 mainSong 音频 → 发语音消息。"""
+        """播客节目：取 mainSong 音频 → 发送。"""
         info = await fetch_program_detail(program_id, api_base, timeout, real_ip, cookie)
         await self._send(event, f"正在解析播客：{info.name} - {info.artist}")
 
@@ -336,7 +529,7 @@ class NeteaseParserPlugin(Star):
         if not url_result.url:
             await self._send(event, "音频不可用（可能需要版权/登录）")
             return
-        ext = ".flac" if high_quality and url_result.type == "flac" else ".mp3"
+        ext = ".flac" if url_result.type == "flac" else ".mp3"
         try:
             path = await download_audio(url_result.url, cache_dir, timeout, max_file_mb, file_ext=ext)
         except Exception as e:
@@ -344,6 +537,10 @@ class NeteaseParserPlugin(Star):
             return
         display_name = f"{_sanitize_filename(info.name)} - {_sanitize_filename(info.artist)}{ext}"
         await self._send_audio(event, path, display_name)
+        self._record_send(
+            event.get_sender_id() or "", "program", program_id, info.name,
+            "flac" if url_result.type == "flac" else "mp3",
+        )
 
     async def _send_audio(self, event, path: Path, display_name: str) -> None:
         """发送音频：优先经 OneBot 上传接口以 base64 发送（跨容器可用），失败时降级为文件消息。"""
@@ -405,7 +602,7 @@ class NeteaseParserPlugin(Star):
                 if not url_result.url:
                     failed += 1
                     continue
-                ext = ".flac" if high_quality and url_result.type == "flac" else ".mp3"
+                ext = ".flac" if url_result.type == "flac" else ".mp3"
                 path = await download_audio(url_result.url, cache_dir, timeout, max_file_mb, file_ext=ext)
                 arc_name = f"{index + 1:02d}. {_sanitize_filename(song.name)} - {_sanitize_filename(song.artist)}{ext}"
                 files.append((path, arc_name))
@@ -447,41 +644,8 @@ class NeteaseParserPlugin(Star):
             finally:
                 _try_cleanup(zip_path)
 
-    # ── 格式偏好切换 ──
-
-    async def _handle_quality_switch(self, event: AstrMessageEvent, text: str):
-        cfg = self._cfg()
-        if not cfg.get("quality_switch", True):
-            return
-        if _FLAC_RE.search(text) and not _MP3_RE.search(text):
-            target = "flac"
-        else:
-            target = "mp3"
-        user_id = event.get_sender_id() or ""
-        await self._set_user_quality(user_id, target)
-        label = "FLAC" if target == "flac" else "MP3"
-        logger.info(f"[Netease] 格式偏好 → user={user_id} target={label}")
-        yield event.plain_result(
-            f"已记住你的偏好：以后解析默认发送 {label}（直接发链接即可；想换格式再说 mp3/flac）"
-        )
-
 
 # ── 工具 ──
-
-
-def _extract_card_texts(event: AstrMessageEvent) -> list[str]:
-    """从消息对象中提取卡片文本（QQ 音乐分享卡片等，尽力而为）。"""
-    texts: list[str] = []
-    try:
-        message = event.get_message()
-        for segment in getattr(message, "segments", []) or []:
-            for field in ("json", "data", "content", "url"):
-                value = getattr(segment, field, None)
-                if isinstance(value, str) and "http" in value:
-                    texts.append(value)
-    except Exception:
-        pass
-    return texts
 
 
 def _try_cleanup(path: Path) -> None:

@@ -12,7 +12,15 @@
   "max_file_mb": { "type": "int", "default": 200, "description": "单文件大小上限（MB）" },
   "max_links_per_message": { "type": "int", "default": 5, "description": "单条消息最多解析的链接数" },
   "short_link_timeout": { "type": "int", "default": 10, "description": "163cn.tv 短链接解析超时（秒）" },
-  "quality_switch": { "type": "bool", "default": true, "description": "允许通过发送 mp3/flac 字样切换格式偏好" },
+  "quality_switch": { "type": "bool", "default": true, "description": "允许回复机器人消息发送 mp3/flac 换格式（并记住偏好）" },
+  "card_hint": {
+    "description": "群聊卡片引导提示（群聊收到网易云链接但未 @ 时引导用户）",
+    "type": "object",
+    "items": {
+      "enabled": { "type": "bool", "default": true, "description": "启用卡片引导提示" },
+      "cooldown_seconds": { "type": "int", "default": 300, "description": "同群引导提示冷却（秒）" }
+    }
+  },
   "cache_dir": { "type": "string", "default": "", "description": "音频缓存目录（留空用系统临时目录）" },
   "pack_dir": { "type": "string", "default": "", "description": "ZIP 打包目录（留空用系统临时目录）" },
   "max_songs_per_zip": { "type": "int", "default": 50, "description": "单个 ZIP 最多包含的歌曲数" },
